@@ -17,16 +17,16 @@
 set -o nounset
 set -o pipefail
 
-source $(dirname "${BASH_SOURCE[0]}")/test-utils.sh
+source "$(dirname "${BASH_SOURCE[0]}")/test-utils.sh"
 
 POUCH_SOCK="/var/run/pouchcri.sock"
 
 # CRI_FOCUS focuses the test to run.
 # With the CRI manager completes its function, we may need to expand this field.
-CRI_FOCUS=${CRI_FOCUS:-"PodSandbox|AppArmor|Privileged is true|basic operations on container|Runtime info|mount propagation|volume and device|RunAsUser|container port|exec|attach"}
+CRI_FOCUS=${CRI_FOCUS:-}
 
 # CRI_SKIP skips the test to skip.
-CRI_SKIP=${CRI_SKIP:-"RunAsUserName"}
+CRI_SKIP=${CRI_SKIP:-"RunAsUserName|seccomp localhost|should error on create with wrong options|runtime should support reopening container log"}
 # REPORT_DIR is the the directory to store test logs.
 REPORT_DIR=${REPORT_DIR:-"/tmp/test-cri"}
 
@@ -42,8 +42,8 @@ GOPATH=${GOPATH%%:*}
 # Install CNI first
 mkdir -p /etc/cni/net.d /opt/cni/bin
 
-git clone https://github.com/containernetworking/plugins $GOPATH/src/github.com/containernetworking/plugins
-cd $GOPATH/src/github.com/containernetworking/plugins
+git clone https://github.com/containernetworking/plugins "$GOPATH/src/github.com/containernetworking/plugins"
+cd "$GOPATH/src/github.com/containernetworking/plugins"
 
 ./build.sh
 cp bin/* /opt/cni/bin
@@ -85,22 +85,30 @@ EOF'
 
 CRITEST=${GOPATH}/bin/critest
 CRITOOL_PKG=github.com/kubernetes-incubator/cri-tools
+GINKGO=${GOPATH}/bin/ginkgo
+GINKGO_PKG=github.com/onsi/ginkgo/ginkgo
 
 # Install critest
-if [ ! -x "$(command -v ${CRITEST})" ]; then
+if [ ! -x "$(command -v "${CRITEST}")" ]; then
   go get -d ${CRITOOL_PKG}/...
-  cd ${GOPATH}/src/${CRITOOL_PKG}
+  cd "${GOPATH}/src/${CRITOOL_PKG}"
   git fetch --all
-  git checkout ${CRITOOL_VERSION}
+  git checkout "${CRITOOL_VERSION}"
   make
 fi
-which ${CRITEST}
+which "${CRITEST}"
 
-mkdir -p ${REPORT_DIR}
-test_setup ${REPORT_DIR}
+# Install ginkgo
+if [ ! -x "$(command -v "${GINKGO}")" ]; then
+  go get -u ${GINKGO_PKG}
+fi
+which "${GINKGO}"
+
+mkdir -p "${REPORT_DIR}"
+test_setup "${REPORT_DIR}"
 
 # Run cri validation test
-sudo env PATH=${PATH} GOPATH=${GOPATH} ${CRITEST} --runtime-endpoint=${POUCH_SOCK} --focus="${CRI_FOCUS}" --ginkgo-flags="--skip=\"${CRI_SKIP}\"" validation
+sudo env PATH="${PATH}" GOPATH="${GOPATH}" "${CRITEST}" --runtime-endpoint=${POUCH_SOCK} --ginkgo.focus="${CRI_FOCUS}" --ginkgo.skip="${CRI_SKIP}"
 test_exit_code=$?
 
 test_teardown

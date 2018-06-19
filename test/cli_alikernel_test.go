@@ -6,6 +6,7 @@ import (
 
 	"github.com/alibaba/pouch/test/command"
 	"github.com/alibaba/pouch/test/environment"
+
 	"github.com/go-check/check"
 	"github.com/gotestyourself/gotestyourself/icmd"
 )
@@ -24,7 +25,7 @@ func (suite *PouchAliKernelSuite) SetUpSuite(c *check.C) {
 
 	environment.PruneAllContainers(apiClient)
 
-	command.PouchRun("pull", busyboxImage).Assert(c, icmd.Success)
+	PullImage(c, busyboxImage)
 }
 
 // TearDownTest does cleanup work in the end of each test.
@@ -40,11 +41,11 @@ func (suite *PouchAliKernelSuite) TestAliKernelDiskQuotaWorks(c *check.C) {
 		funcname = tmpname[i]
 	}
 
-	command.PouchRun("volume", "create", "--name", funcname, "-d", "local", "-o", "size=1g").Assert(c, icmd.Success)
+	command.PouchRun("volume", "create", "--name", funcname, "-d", "local", "-o", "opt.size=1g").Assert(c, icmd.Success)
 	defer command.PouchRun("volume", "rm", funcname)
 
 	command.PouchRun("run", "-d", "-v", funcname+":/mnt", "--name", funcname, busyboxImage, "top").Assert(c, icmd.Success)
-	defer command.PouchRun("rm", "-f", funcname)
+	defer DelContainerForceMultyTime(c, funcname)
 
 	expct := icmd.Expected{
 		ExitCode: 0,
@@ -56,7 +57,7 @@ func (suite *PouchAliKernelSuite) TestAliKernelDiskQuotaWorks(c *check.C) {
 	// generate a file larger than 1G should fail.
 	expct = icmd.Expected{
 		// TODO: Add exit code check when pouch exec return the exit code of process
-		Out: "Disk quota exceeded",
+		Error: "Disk quota exceeded",
 	}
 	cmd := "dd if=/dev/zero of=/mnt/test bs=1024k count=1500"
 	err = command.PouchRun("exec", funcname, "sh", "-c", cmd).Compare(expct)
@@ -75,14 +76,14 @@ func (suite *PouchAliKernelSuite) TestAliKernelDiskQuotaMultiWorks(c *check.C) {
 	name1 := funcname + "1"
 	name2 := funcname + "2"
 
-	command.PouchRun("volume", "create", "--name", name1, "-d", "local", "-o", "size=2.2g").Assert(c, icmd.Success)
+	command.PouchRun("volume", "create", "--name", name1, "-d", "local", "-o", "opt.size=2.2g").Assert(c, icmd.Success)
 	defer command.PouchRun("volume", "rm", name1)
 
-	command.PouchRun("volume", "create", "--name", name2, "-d", "local", "-o", "size=3.2g").Assert(c, icmd.Success)
+	command.PouchRun("volume", "create", "--name", name2, "-d", "local", "-o", "opt.size=3.2g").Assert(c, icmd.Success)
 	defer command.PouchRun("volume", "rm", name2)
 
 	command.PouchRun("run", "-d", "-v", name1+":/mnt/test1", "-v", name2+":/mnt/test2", "--name", funcname, busyboxImage, "top").Assert(c, icmd.Success)
-	defer command.PouchRun("rm", "-f", funcname)
+	defer DelContainerForceMultyTime(c, funcname)
 
 	{
 		expct := icmd.Expected{

@@ -7,7 +7,6 @@ import (
 
 	"github.com/alibaba/pouch/pkg/errtypes"
 
-	"github.com/containerd/containerd"
 	"github.com/sirupsen/logrus"
 )
 
@@ -35,22 +34,55 @@ func (m *Message) ExitTime() time.Time {
 
 type watch struct {
 	sync.Mutex
-	client     *containerd.Client
 	containers map[string]*containerPack
 	hooks      []func(string, *Message) error
+
+	// containerdDead to specify whether containerd process is dead
+	containerdDead bool
+}
+
+func (w *watch) setContainerdDead(isDead bool) error {
+	w.Lock()
+	defer w.Unlock()
+
+	w.containerdDead = isDead
+	return nil
+}
+
+func (w *watch) isContainerdDead() bool {
+	w.Lock()
+	defer w.Unlock()
+
+	return w.containerdDead
 }
 
 func (w *watch) add(pack *containerPack) {
 	w.Lock()
 	defer w.Unlock()
 
+	// TODO(ziren): AcquireQuota may occurred an error
+	// record stream client for grpc client.
+	_ = pack.client.Consume(1)
+
 	w.containers[pack.id] = pack
 
-	go func(pack *containerPack) {
+	go func(w *watch, pack *containerPack) {
 		status := <-pack.sch
+
+		// if containerd is dead, the task.Wait channel return is not because
+		// container' task quit, but the channel has broken.
+		// so we just return.
+		if w.isContainerdDead() {
+			return
+		}
 
 		logrus.Infof("the task has quit, id: %s, err: %v, exitcode: %d, time: %v",
 			pack.id, status.Error(), status.ExitCode(), status.ExitTime())
+
+		// Also should release quota when the container destroyed
+		// We should release quota of client that the pack is in using,
+		// not the grpc client executing this parts of code.
+		pack.client.Produce(1)
 
 		if _, err := pack.task.Delete(context.Background()); err != nil {
 			logrus.Errorf("failed to delete task, container id: %s: %v", pack.id, err)
@@ -77,7 +109,7 @@ func (w *watch) add(pack *containerPack) {
 
 		pack.ch <- msg
 
-	}(pack)
+	}(w, pack)
 
 	logrus.Infof("success to add container, id: %s", pack.id)
 }

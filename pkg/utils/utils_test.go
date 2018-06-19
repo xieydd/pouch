@@ -1,6 +1,12 @@
 package utils
 
 import (
+	goerrors "errors"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -136,6 +142,7 @@ func TestMerge(t *testing.T) {
 		Sc bool
 		Sd map[string]string
 		Se nestS
+		Sf []string
 	}
 
 	getIntAddr := func(i int) *int {
@@ -160,7 +167,7 @@ func TestMerge(t *testing.T) {
 		}, {
 			src:      getIntAddr(1),
 			dest:     getIntAddr(2),
-			expected: "merged object type shoule be struct",
+			expected: "merged object type should be struct",
 			ok:       false,
 		}, {
 			src:      &nestS{},
@@ -180,7 +187,39 @@ func TestMerge(t *testing.T) {
 		}, {
 			src:      &simple{},
 			dest:     &simple{Sa: 1, Sb: "hello", Sc: true, Sd: map[string]string{"go": "gogo"}, Se: nestS{Na: 22}},
-			expected: &simple{Sa: 1, Sb: "hello", Sc: true, Sd: map[string]string{"go": "gogo"}, Se: nestS{Na: 22}},
+			expected: &simple{Sa: 0, Sb: "hello", Sc: false, Sd: map[string]string{"go": "gogo"}, Se: nestS{Na: 0}},
+			ok:       true,
+		}, {
+			src:      &simple{Sa: 1, Sc: true, Sd: map[string]string{"go": "gogo"}, Se: nestS{Na: 11}, Sf: []string{"foo"}},
+			dest:     &simple{Sa: 2, Sb: "!", Sc: false, Sd: map[string]string{"go": "old"}, Se: nestS{Na: 22}, Sf: []string{"foo"}},
+			expected: &simple{Sa: 1, Sb: "!", Sc: true, Sd: map[string]string{"go": "gogo"}, Se: nestS{Na: 11}, Sf: []string{"foo", "foo"}},
+			ok:       true,
+		}, {
+			src:      &simple{Sa: 0, Sc: false, Sd: map[string]string{"go": "gogo"}, Se: nestS{Na: 11}, Sf: []string{"foo"}},
+			dest:     &simple{Sa: 2, Sb: "world", Sc: true, Sd: map[string]string{"go": "old"}, Se: nestS{Na: 22}, Sf: []string{"foo"}},
+			expected: &simple{Sa: 0, Sb: "world", Sc: false, Sd: map[string]string{"go": "gogo"}, Se: nestS{Na: 11}, Sf: []string{"foo", "foo"}},
+			ok:       true,
+		}, {
+			src:      &simple{Sd: map[string]string{"go": "gogo", "a": "b"}},
+			dest:     &simple{Sd: map[string]string{"go": "old"}},
+			expected: &simple{Sd: map[string]string{"go": "gogo", "a": "b"}},
+			ok:       true,
+		}, {
+			src:      &simple{Sd: map[string]string{"go": "gogo", "a": "b"}},
+			dest:     &simple{},
+			expected: &simple{Sd: map[string]string{"go": "gogo", "a": "b"}},
+			ok:       true,
+		}, {
+			// empty map should not overwrite
+			src:      &simple{Sd: map[string]string{}},
+			dest:     &simple{Sd: map[string]string{"a": "b"}},
+			expected: &simple{Sd: map[string]string{"a": "b"}},
+			ok:       true,
+		}, {
+			// empty slice should not overwrite
+			src:      &simple{Sf: []string{}},
+			dest:     &simple{Sf: []string{"c"}},
+			expected: &simple{Sf: []string{"c"}},
 			ok:       true,
 		},
 	} {
@@ -194,6 +233,287 @@ func TestMerge(t *testing.T) {
 				t.Fatalf("test should fail: %v", tm)
 			}
 			assert.EqualError(err, errMsg)
+		}
+	}
+}
+
+func TestDeDuplicate(t *testing.T) {
+	type args struct {
+		input []string
+	}
+	tests := []struct {
+		name string
+		args args
+		want []string
+	}{
+		{
+			name: "nil test case",
+			args: args{
+				input: nil,
+			},
+			want: nil,
+		},
+		{
+			name: "two duplicated case",
+			args: args{
+				input: []string{"asdfgh", "asdfgh"},
+			},
+			want: []string{"asdfgh"},
+		},
+		{
+			name: "case with no duplicated",
+			args: args{
+				input: []string{"asdfgh01", "asdfgh02", "asdfgh03", "asdfgh04"},
+			},
+			want: []string{"asdfgh01", "asdfgh02", "asdfgh03", "asdfgh04"},
+		},
+		{
+			name: "case with two duplicated",
+			args: args{
+				input: []string{"asdfgh01", "asdfgh02", "asdfgh01"},
+			},
+			want: []string{"asdfgh01", "asdfgh02"},
+		},
+		{
+			name: "case with 3 duplicated",
+			args: args{
+				input: []string{"asdfgh01", "asdfgh01", "asdfgh01"},
+			},
+			want: []string{"asdfgh01"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DeDuplicate(tt.args.input); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("DeDuplicate() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCombineErrors(t *testing.T) {
+	formatErrMsg := func(idx int, err error) (string, error) {
+		return "Error: " + err.Error(), nil
+	}
+	errs := []error{
+		goerrors.New("Fetch object error: No such object: alpine"),
+		goerrors.New("Template parsing error: Can't evaluate field Name"),
+	}
+	combinedErr := CombineErrors(errs, formatErrMsg)
+	expectedErrMsg := "Error: Fetch object error: No such object: alpine\n" +
+		"Error: Template parsing error: Can't evaluate field Name"
+	if combinedErr.Error() != expectedErrMsg {
+		t.Errorf("get error: expected: \n%s, but was: \n%s", expectedErrMsg, combinedErr)
+	}
+
+	formatErrMsg = func(idx int, err error) (string, error) {
+		return "", goerrors.New("Error: failed to format error message")
+	}
+	combinedErr = CombineErrors(errs, formatErrMsg)
+	expectedErrMsg = "Combine errors error: Error: failed to format error message"
+	if combinedErr.Error() != expectedErrMsg {
+		t.Errorf("get error: expected: %s, but was: %s", expectedErrMsg, combinedErr)
+	}
+}
+
+func TestContains(t *testing.T) {
+	type args struct {
+		input []interface{}
+		value interface{}
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    bool
+		wantErr bool
+	}{
+		// TODO: Add test cases.
+		{name: "test1", args: args{input: []interface{}{1, 2}, value: "1"}, want: false, wantErr: true},
+		{name: "test2", args: args{input: []interface{}{"1", "2"}, value: "1"}, want: true, wantErr: false},
+		{name: "test3", args: args{input: []interface{}{"1", "2"}, value: "3"}, want: false, wantErr: false},
+		{name: "test4", args: args{input: []interface{}{1, 2}, value: 1}, want: true, wantErr: false},
+		{name: "test5", args: args{input: []interface{}{1, 2}, value: 3}, want: false, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Contains(tt.args.input, tt.args.value)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Contains() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("Contains() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStringInSlice(t *testing.T) {
+	type args struct {
+		str   string
+		input []string
+	}
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{name: "TestInSlice", args: args{input: []string{"foo", "bar"}, str: "foo"}, want: true},
+		{name: "TestNotInSlice", args: args{input: []string{"goods", "bar"}, str: "foo"}, want: false},
+		{name: "TestEmptyStr", args: args{input: []string{"foo", "bar"}, str: ""}, want: false},
+		{name: "TestEmptySlice", args: args{input: []string{}, str: "bar"}, want: false},
+		{name: "TestAllEmpty", args: args{input: []string{}, str: ""}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StringInSlice(tt.args.input, tt.args.str); got != tt.want {
+				t.Errorf("StringInSlice() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckPidExist(t *testing.T) {
+	assert := assert.New(t)
+
+	type tCase struct {
+		path     string
+		pidexist bool
+	}
+
+	// mock pidfiles with a must-exist pid 1 and a must-not-exist pid 1 << 30
+	dir, err := ioutil.TempDir("/tmp/", "")
+	assert.NoError(err)
+	defer os.RemoveAll(dir)
+	file1 := filepath.Join(dir, "file1")
+	file2 := filepath.Join(dir, "file2")
+	err = ioutil.WriteFile(file1, []byte(fmt.Sprintf("%d", 1)), 0644)
+	assert.NoError(err)
+	err = ioutil.WriteFile(file2, []byte(fmt.Sprintf("%d", 1<<30)), 0644)
+	assert.NoError(err)
+
+	for _, t := range []tCase{
+		{
+			path:     "/foo/bar",
+			pidexist: false,
+		},
+		{
+			path:     file1,
+			pidexist: true,
+		},
+		{
+			path:     file2,
+			pidexist: false,
+		},
+	} {
+		err := checkPidfileStatus(t.path)
+		if t.pidexist {
+			assert.Error(err)
+		} else {
+			assert.NoError(err)
+		}
+	}
+}
+
+func TestGetTimestamp(t *testing.T) {
+	now := time.Now().In(time.UTC)
+
+	tCases := []struct {
+		val      string
+		expected string
+		hasError bool
+	}{
+		// relative time
+		{"1s", fmt.Sprintf("%d", now.Add(-1*time.Second).Unix()), false},
+		{"1m", fmt.Sprintf("%d", now.Add(-1*time.Minute).Unix()), false},
+		{"1.5h", fmt.Sprintf("%d", now.Add(-90*time.Minute).Unix()), false},
+		{"1h30m", fmt.Sprintf("%d", now.Add(-90*time.Minute).Unix()), false},
+
+		// time
+		{"2018-07-16T08:00:00.999999999+08:00", "1531699200.999999999", false},
+		{"2018-07-16T08:00:00.999999999+00:00", "1531728000.999999999", false},
+		{"2018-07-16T08:00:00.999999999-00:00", "1531728000.999999999", false},
+		{"2018-07-16T08:00:00.999999999Z", "1531728000.999999999", false},
+		{"2018-07-16T08:00:00.999999999", "1531728000.999999999", false},
+
+		{"2018-07-16T08:00:00", "1531728000.000000000", false},
+		{"2018-07-16T08:00:00Z", "1531728000.000000000", false},
+		{"2018-07-16T08:00:00+00:00", "1531728000.000000000", false},
+		{"2018-07-16T08:00:00-00:00", "1531728000.000000000", false},
+
+		{"2018-07-16T08:00", "1531728000.000000000", false},
+		{"2018-07-16T08:00Z", "1531728000.000000000", false},
+		{"2018-07-16T08:00+00:00", "1531728000.000000000", false},
+		{"2018-07-16T08:00-00:00", "1531728000.000000000", false},
+
+		{"2018-07-16T08", "1531728000.000000000", false},
+		{"2018-07-16T08Z", "1531728000.000000000", false},
+		{"2018-07-16T08+01:00", "1531724400.000000000", false},
+		{"2018-07-16T08-01:00", "1531731600.000000000", false},
+
+		{"2018-07-16", "1531699200.000000000", false},
+		{"2018-07-16Z", "1531699200.000000000", false},
+		{"2018-07-16+01:00", "1531695600.000000000", false},
+		{"2018-07-16-01:00", "1531702800.000000000", false},
+
+		// timestamp
+		{"0", "0", false},
+		{"12", "12", false},
+		{"12a", "12a", false},
+
+		// invalid input
+		{"-12", "", true},
+		{"2006-01-02T15:04:0Z", "", true},
+		{"2006-01-02T15:04:0", "", true},
+		{"2006-01-02T15:0Z", "", true},
+		{"2006-01-02T15:0", "", true},
+	}
+
+	for _, tc := range tCases {
+		got, err := GetUnixTimestamp(tc.val, now)
+		if err != nil && !tc.hasError {
+			t.Fatalf("unexpected error %v", err)
+		}
+
+		if err == nil && tc.hasError {
+			t.Fatal("expected error, but got nothing")
+		}
+
+		if got != tc.expected {
+			t.Errorf("expected %v, but got %v", tc.expected, got)
+		}
+	}
+}
+
+func TestParseTimestamp(t *testing.T) {
+	tCases := []struct {
+		val          string
+		defaultSec   int64
+		expectedSec  int64
+		expectedNano int64
+		hasError     bool
+	}{
+		{"20180510", 0, 20180510, 0, false},
+		{"20180510.000000001", 0, 20180510, 1, false},
+		{"20180510.0000000010", 0, 20180510, 1, false},
+		{"20180510.00000001", 0, 20180510, 10, false},
+		{"foo.bar", 0, 0, 0, true},
+		{"20180510.bar", 0, 0, 0, true},
+		{"", -1, -1, 0, false},
+	}
+
+	for _, tc := range tCases {
+		s, n, err := ParseTimestamp(tc.val, tc.defaultSec)
+		if err == nil && tc.hasError {
+			t.Fatal("expected error, but got nothing")
+		}
+
+		if err != nil && !tc.hasError {
+			t.Fatalf("unexpected error %v", err)
+		}
+
+		if s != tc.expectedSec || n != tc.expectedNano {
+			t.Fatalf("expected sec %v, nano %v, but got sec %v, nano %v", tc.expectedSec, tc.expectedNano, s, n)
 		}
 	}
 }

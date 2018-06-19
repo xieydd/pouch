@@ -3,10 +3,12 @@ package main
 import (
 	"github.com/alibaba/pouch/test/command"
 	"github.com/alibaba/pouch/test/environment"
+
 	"github.com/go-check/check"
+	"github.com/gotestyourself/gotestyourself/icmd"
 )
 
-// PouchHelpSuite is the test suite fo help CLI.
+// PouchHelpSuite is the test suite for help CLI.
 type PouchHelpSuite struct{}
 
 func init() {
@@ -32,9 +34,9 @@ func (suite *PouchHelpSuite) TestHelpWorks(c *check.C) {
 	for arg, ok := range args {
 		res := command.PouchRun(arg)
 		if ok {
-			c.Assert(res.Error, check.IsNil)
+			res.Assert(c, icmd.Success)
 		} else {
-			c.Assert(res.Error, check.NotNil)
+			c.Assert(res.Stderr(), check.NotNil)
 		}
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"path"
+	"strings"
+	"time"
 
 	apitypes "github.com/alibaba/pouch/apis/types"
 	"github.com/alibaba/pouch/daemon/config"
@@ -15,6 +17,7 @@ import (
 	"github.com/alibaba/pouch/pkg/randomid"
 
 	netlog "github.com/Sirupsen/logrus"
+	"github.com/docker/go-connections/nat"
 	"github.com/docker/libnetwork"
 	nwconfig "github.com/docker/libnetwork/config"
 	"github.com/docker/libnetwork/netlabel"
@@ -29,26 +32,26 @@ type NetworkMgr interface {
 	// Create is used to create network.
 	Create(ctx context.Context, create apitypes.NetworkCreateConfig) (*types.Network, error)
 
-	// NetworkRemove is used to delete an existing network.
-	Remove(ctx context.Context, name string) error
+	// Get returns the information of network that specified name/id.
+	Get(ctx context.Context, name string) (*types.Network, error)
 
 	// List returns all networks on this host.
 	List(ctx context.Context, labels map[string]string) ([]*types.Network, error)
 
-	// Get returns the information of network that specified name/id.
-	Get(ctx context.Context, name string) (*types.Network, error)
+	// NetworkRemove is used to delete an existing network.
+	Remove(ctx context.Context, name string) error
 
 	// EndpointCreate is used to create network endpoint.
 	EndpointCreate(ctx context.Context, endpoint *types.Endpoint) (string, error)
 
-	// EndpointRemove is used to remove network endpoint.
-	EndpointRemove(ctx context.Context, endpoint *types.Endpoint) error
+	// EndpointInfo returns the information of endpoint that specified name/id.
+	EndpointInfo(ctx context.Context, name string) (*types.Endpoint, error)
 
 	// EndpointList returns all endpoints.
 	EndpointList(ctx context.Context) ([]*types.Endpoint, error)
 
-	// EndpointInfo returns the information of endpoint that specified name/id.
-	EndpointInfo(ctx context.Context, name string) (*types.Endpoint, error)
+	// EndpointRemove is used to remove network endpoint.
+	EndpointRemove(ctx context.Context, endpoint *types.Endpoint) error
 
 	// Controller returns the network controller.
 	Controller() libnetwork.NetworkController
@@ -62,14 +65,38 @@ type NetworkManager struct {
 }
 
 // NewNetworkManager creates a brand new network manager.
-func NewNetworkManager(cfg *config.Config, store *meta.Store) (*NetworkManager, error) {
+func NewNetworkManager(cfg *config.Config, store *meta.Store, ctrMgr ContainerMgr) (*NetworkManager, error) {
 	// Create a new controller instance
-	cfg.NetworkConfg.MetaPath = path.Dir(store.BaseDir)
-	cfg.NetworkConfg.ExecRoot = network.DefaultExecRoot
+	if cfg.NetworkConfig.MetaPath == "" {
+		cfg.NetworkConfig.MetaPath = path.Dir(store.BaseDir)
+	}
+
+	if cfg.NetworkConfig.ExecRoot == "" {
+		cfg.NetworkConfig.ExecRoot = network.DefaultExecRoot
+	}
 
 	initNetworkLog(cfg)
 
-	ctlOptions, err := controllerOptions(cfg.NetworkConfg)
+	// get active sandboxes
+	ctrs, err := ctrMgr.List(context.Background(),
+		func(c *Container) bool {
+			return (c.IsRunning() || c.IsPaused()) && !isContainer(c.HostConfig.NetworkMode)
+		}, &ContainerListOption{All: true})
+	if err != nil {
+		logrus.Errorf("failed to new network manager, can not get container list")
+		return nil, errors.Wrap(err, "failed to get container list")
+	}
+	cfg.NetworkConfig.ActiveSandboxes = make(map[string]interface{})
+	for _, c := range ctrs {
+		endpoint := BuildContainerEndpoint(c)
+		sbOptions, err := buildSandboxOptions(cfg.NetworkConfig, endpoint)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to build sandbox options")
+		}
+		cfg.NetworkConfig.ActiveSandboxes[c.NetworkSettings.SandboxID] = sbOptions
+	}
+
+	ctlOptions, err := controllerOptions(cfg.NetworkConfig)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to build network options")
 	}
@@ -82,7 +109,7 @@ func NewNetworkManager(cfg *config.Config, store *meta.Store) (*NetworkManager, 
 	return &NetworkManager{
 		store:      store,
 		controller: controller,
-		config:     cfg.NetworkConfg,
+		config:     cfg.NetworkConfig,
 	}, nil
 }
 
@@ -116,20 +143,24 @@ func (nm *NetworkManager) Create(ctx context.Context, create apitypes.NetworkCre
 	return &network, nil
 }
 
-// Remove is used to delete an existing network.
-func (nm *NetworkManager) Remove(ctx context.Context, name string) error {
-	nw, err := nm.controller.NetworkByName(name)
-	if err != nil {
-		if err == libnetwork.ErrNoSuchNetwork(name) {
-			return errors.Wrap(errtypes.ErrNotfound, err.Error())
-		}
-		return err
-	}
-	if nw == nil {
-		return nil
+// Get returns the information of network for specified string that represent network name or ID.
+// If network name is given, the network with same name is returned.
+// If prefix of network ID is given, the network with same prefix is returned.
+func (nm *NetworkManager) Get(ctx context.Context, idName string) (*types.Network, error) {
+	n, err := nm.GetNetworkByName(idName)
+	if err != nil && !isNoSuchNetworkError(err) {
+		return nil, err
 	}
 
-	return nw.Delete()
+	if n != nil {
+		return n, nil
+	}
+
+	n, err = nm.GetNetworkByPartialID(idName)
+	if err != nil {
+		return nil, err
+	}
+	return n, err
 }
 
 // List returns all networks on this host.
@@ -148,26 +179,86 @@ func (nm *NetworkManager) List(ctx context.Context, labels map[string]string) ([
 	return net, nil
 }
 
-// Get returns the information of network that specified name/id.
-func (nm *NetworkManager) Get(ctx context.Context, name string) (*types.Network, error) {
-	n, err := nm.controller.NetworkByName(name)
+// Remove is used to delete an existing network.
+func (nm *NetworkManager) Remove(ctx context.Context, name string) error {
+	nw, err := nm.controller.NetworkByName(name)
 	if err != nil {
 		if err == libnetwork.ErrNoSuchNetwork(name) {
-			return nil, errors.Wrap(errtypes.ErrNotfound, err.Error())
+			return errors.Wrap(errtypes.ErrNotfound, err.Error())
 		}
+		return err
+	}
+	if nw == nil {
+		return nil
+	}
+
+	return nw.Delete()
+}
+
+// GetNetworkByName returns the information of network that specified name.
+func (nm *NetworkManager) GetNetworkByName(name string) (*types.Network, error) {
+	n, err := nm.controller.NetworkByName(name)
+	if err != nil {
 		return nil, err
 	}
+	return &types.Network{
+		Name:    n.Name(),
+		ID:      n.ID(),
+		Type:    n.Type(),
+		Network: n,
+	}, nil
+}
 
-	if n != nil {
+// GetNetworkByPartialID returns the information of network that ID starts with the given prefix.
+// If there are not matching networks, it fails with ErrNotfound.
+// If there are multiple matching networks, it fails with ErrTooMany.
+func (nm *NetworkManager) GetNetworkByPartialID(partialID string) (*types.Network, error) {
+	network, err := nm.controller.NetworkByID(partialID)
+	if err == nil {
 		return &types.Network{
-			Name:    name,
-			ID:      n.ID(),
-			Type:    n.Type(),
-			Network: n,
+			Name:    network.Name(),
+			ID:      network.ID(),
+			Type:    network.Type(),
+			Network: network,
 		}, nil
 	}
+	if !isNoSuchNetworkError(err) {
+		return nil, err
+	}
+	matchedNetworks := nm.GetNetworksByPartialID(partialID)
+	if len(matchedNetworks) == 0 {
+		return nil, errors.Wrap(errtypes.ErrNotfound, "network: "+partialID)
+	}
+	if len(matchedNetworks) > 1 {
+		return nil, errors.Wrap(errtypes.ErrTooMany, "network: "+partialID)
+	}
+	return matchedNetworks[0], nil
+}
 
-	return nil, nil
+// GetNetworksByPartialID returns a list of networks that ID starts with the given prefix.
+func (nm *NetworkManager) GetNetworksByPartialID(partialID string) []*types.Network {
+	var matchedNetworks []*types.Network
+
+	walker := func(nw libnetwork.Network) bool {
+		if strings.HasPrefix(nw.ID(), partialID) {
+			matchedNetwork := &types.Network{
+				Name:    nw.Name(),
+				ID:      nw.ID(),
+				Type:    nw.Type(),
+				Network: nw,
+			}
+			matchedNetworks = append(matchedNetworks, matchedNetwork)
+		}
+		return false
+	}
+	nm.controller.WalkNetworks(walker)
+	return matchedNetworks
+}
+
+// isNoSuchNetworkError looks up the error type and returns a bool if it is ErrNoSuchNetwork or not.
+func isNoSuchNetworkError(err error) bool {
+	_, ok := err.(libnetwork.ErrNoSuchNetwork)
+	return ok
 }
 
 // EndpointCreate is used to create network endpoint.
@@ -191,7 +282,7 @@ func (nm *NetworkManager) EndpointCreate(ctx context.Context, endpoint *types.En
 	}
 
 	// create endpoint
-	epOptions, err := endpointOptions(n, networkConfig, endpointConfig)
+	epOptions, err := endpointOptions(n, endpoint)
 	if err != nil {
 		return "", err
 	}
@@ -199,36 +290,40 @@ func (nm *NetworkManager) EndpointCreate(ctx context.Context, endpoint *types.En
 	endpointName := containerID[:8]
 	ep, err := n.CreateEndpoint(endpointName, epOptions...)
 	if err != nil {
-		logrus.Errorf("failed to create endpoint, err: %v", err)
 		return "", err
 	}
+
+	defer func() {
+		if err != nil {
+			if err := ep.Delete(true); err != nil {
+				logrus.Errorf("could not delete endpoint %s after failing to create endpoint(%v)", ep.Name(), err)
+			}
+		}
+	}()
 
 	// create sandbox
 	sb := nm.getNetworkSandbox(containerID)
 	if sb == nil {
-		sandboxOptions, err := nm.sandboxOptions(endpoint)
+		sandboxOptions, err := buildSandboxOptions(nm.config, endpoint)
 		if err != nil {
-			logrus.Errorf("failed to build sandbox options, err: %v", err)
-			return "", err
+			return "", fmt.Errorf("failed to build sandbox options(%v)", err)
 		}
 
 		sb, err = nm.controller.NewSandbox(containerID, sandboxOptions...)
 		if err != nil {
-			logrus.Errorf("failed to create sandbox, err: %v", err)
-			return "", err
+			return "", fmt.Errorf("failed to create sandbox(%v)", err)
 		}
 	}
 	networkConfig.SandboxID = sb.ID()
 	networkConfig.SandboxKey = sb.Key()
 
 	// endpoint joins into sandbox
-	joinOptions, err := joinOptions(endpointConfig)
+	joinOptions, err := joinOptions(endpoint)
 	if err != nil {
 		return "", err
 	}
 	if err := ep.Join(sb, joinOptions...); err != nil {
-		logrus.Errorf("failed to join sandbox, err: %v", err)
-		return "", err
+		return "", fmt.Errorf("failed to join sandbox(%v)", err)
 	}
 
 	// update endpoint settings
@@ -248,7 +343,7 @@ func (nm *NetworkManager) EndpointCreate(ctx context.Context, endpoint *types.En
 		if iface.Address() != nil {
 			mask, _ := iface.Address().Mask.Size()
 			endpointConfig.IPPrefixLen = int64(mask)
-			endpointConfig.IPAddress = iface.Address().String()
+			endpointConfig.IPAddress = iface.Address().IP.String()
 		}
 
 		if iface.MacAddress() != nil {
@@ -259,32 +354,10 @@ func (nm *NetworkManager) EndpointCreate(ctx context.Context, endpoint *types.En
 	return endpointName, nil
 }
 
-// EndpointRemove is used to remove network endpoint.
-func (nm *NetworkManager) EndpointRemove(ctx context.Context, endpoint *types.Endpoint) error {
-	sid := endpoint.NetworkConfig.SandboxID
-	epConfig := endpoint.EndpointConfig
-
-	logrus.Debugf("remove endpoint: %s on network: %s", epConfig.EndpointID, endpoint.Name)
-
-	if sid == "" {
-		return nil
-	}
-
-	sb, err := nm.controller.SandboxByID(sid)
-	if err == nil {
-		if err := sb.Delete(); err != nil {
-			logrus.Errorf("failed to delete sandbox id: %s, err: %v", sid, err)
-			return err
-		}
-	} else if _, ok := err.(networktypes.NotFoundError); !ok {
-		logrus.Errorf("failed to get sandbox id: %s, err: %v", sid, err)
-		return fmt.Errorf("failed to get sandbox id: %s, err: %v", sid, err)
-	}
-
-	// clean endpoint configure data
-	nm.cleanEndpointConfig(epConfig)
-
-	return nil
+// EndpointInfo returns the information of endpoint that specified name/id.
+func (nm *NetworkManager) EndpointInfo(ctx context.Context, name string) (*types.Endpoint, error) {
+	// TODO
+	return nil, nil
 }
 
 // EndpointList returns all endpoints.
@@ -293,10 +366,67 @@ func (nm *NetworkManager) EndpointList(ctx context.Context) ([]*types.Endpoint, 
 	return nil, nil
 }
 
-// EndpointInfo returns the information of endpoint that specified name/id.
-func (nm *NetworkManager) EndpointInfo(ctx context.Context, name string) (*types.Endpoint, error) {
-	// TODO
-	return nil, nil
+// EndpointRemove is used to remove network endpoint.
+func (nm *NetworkManager) EndpointRemove(ctx context.Context, endpoint *types.Endpoint) error {
+	var (
+		ep libnetwork.Endpoint
+	)
+
+	sid := endpoint.NetworkConfig.SandboxID
+	epConfig := endpoint.EndpointConfig
+
+	logrus.Debugf("remove endpoint(%s) on network(%s)", epConfig.EndpointID, endpoint.Name)
+
+	if sid == "" {
+		return nil
+	}
+
+	// find endpoint in network and delete it.
+	sb, err := nm.controller.SandboxByID(sid)
+	if err != nil {
+		return errors.Wrapf(err, "failed to get sandbox by id(%s)", sid)
+	}
+	if sb == nil {
+		return errors.Errorf("failed to get sandbox by id(%s)", sid)
+	}
+
+	eplist := sb.Endpoints()
+	if len(eplist) == 0 {
+		return errors.Errorf("no endpoint in sandbox(%s)", sid)
+	}
+
+	for _, e := range eplist {
+		if e.ID() == epConfig.EndpointID {
+			ep = e
+			break
+		}
+	}
+
+	if ep == nil {
+		return errors.Errorf("not connected to the network(%s)", endpoint.Name)
+	}
+
+	if err := ep.Leave(sb); err != nil {
+		return errors.Wrapf(err, "failed to leave network(%s)", endpoint.Name)
+	}
+
+	if err := ep.Delete(false); err != nil {
+		return errors.Wrapf(err, "failed to delete endpoint(%s)", endpoint.ID)
+	}
+
+	// clean endpoint configure data
+	nm.cleanEndpointConfig(epConfig)
+
+	// check sandbox has endpoint or not.
+	eplist = sb.Endpoints()
+	if len(eplist) == 0 {
+		if err := sb.Delete(); err != nil {
+			logrus.Errorf("failed to delete sandbox id(%s), err(%v)", sid, err)
+			return errors.Wrapf(err, "failed to delete sandbox id(%s)", sid)
+		}
+	}
+
+	return nil
 }
 
 // Controller returns the network controller.
@@ -316,20 +446,24 @@ func controllerOptions(cfg network.Config) ([]nwconfig.Option, error) {
 		options = append(options, nwconfig.OptionExecRoot(cfg.ExecRoot))
 	}
 
+	if len(cfg.ActiveSandboxes) != 0 {
+		options = append(options, nwconfig.OptionActiveSandboxes(cfg.ActiveSandboxes))
+	}
+
 	options = append(options, nwconfig.OptionDefaultDriver("bridge"))
 	options = append(options, nwconfig.OptionDefaultNetwork("bridge"))
 
 	// set bridge options
-	options = append(options, bridgeDriverOptions())
+	options = append(options, bridgeDriverOptions(cfg.BridgeConfig))
 
 	return options, nil
 }
 
-func bridgeDriverOptions() nwconfig.Option {
+func bridgeDriverOptions(cfg network.BridgeConfig) nwconfig.Option {
 	bridgeConfig := options.Generic{
-		"EnableIPForwarding":  true,
-		"EnableIPTables":      true,
-		"EnableUserlandProxy": true}
+		"EnableIPForwarding":  cfg.IPForward,
+		"EnableIPTables":      cfg.IPTables,
+		"EnableUserlandProxy": cfg.UserlandProxy}
 	bridgeOption := options.Generic{netlabel.GenericData: bridgeConfig}
 
 	return nwconfig.OptionDriverConfig("bridge", bridgeOption)
@@ -385,7 +519,7 @@ func getIpamConfig(data []apitypes.IPAMConfig) ([]*libnetwork.IpamConf, []*libne
 		iCfg.AuxAddresses = d.AuxAddress
 		ip, _, err := net.ParseCIDR(d.Subnet)
 		if err != nil {
-			return nil, nil, fmt.Errorf("Invalid subnet %s : %v", d.Subnet, err)
+			return nil, nil, fmt.Errorf("Invalid subnet(%s), err(%v)", d.Subnet, err)
 		}
 		if ip.To4() != nil {
 			ipamV4Cfg = append(ipamV4Cfg, &iCfg)
@@ -408,22 +542,23 @@ func (nm *NetworkManager) getNetworkSandbox(id string) libnetwork.Sandbox {
 	return sb
 }
 
+// libnetwork's logrus version is different from pouchd,
+// so we need to set libnetwork's logrus addintionly.
 func initNetworkLog(cfg *config.Config) {
 	if cfg.Debug {
 		netlog.SetLevel(netlog.DebugLevel)
 	}
 
 	formatter := &netlog.TextFormatter{
-		ForceColors:     true,
 		FullTimestamp:   true,
-		TimestampFormat: "2006-01-02 15:04:05.000000000",
+		TimestampFormat: time.RFC3339Nano,
 	}
 	netlog.SetFormatter(formatter)
 }
 
-func endpointOptions(n libnetwork.Network, nwconfig *apitypes.NetworkSettings, epConfig *apitypes.EndpointSettings) ([]libnetwork.EndpointOption, error) {
+func endpointOptions(n libnetwork.Network, endpoint *types.Endpoint) ([]libnetwork.EndpointOption, error) {
 	var createOptions []libnetwork.EndpointOption
-
+	epConfig := endpoint.EndpointConfig
 	if epConfig != nil {
 		ipam := epConfig.IPAMConfig
 		if ipam != nil && (ipam.IPV4Address != "" || ipam.IPV6Address != "" || len(ipam.LinkLocalIps) > 0) {
@@ -445,10 +580,17 @@ func endpointOptions(n libnetwork.Network, nwconfig *apitypes.NetworkSettings, e
 	genericOption := options.Generic{}
 	createOptions = append(createOptions, libnetwork.EndpointOptionGeneric(genericOption))
 
+	if len(endpoint.GenericParams) > 0 {
+		createOptions = append(createOptions, libnetwork.EndpointOptionGeneric(endpoint.GenericParams))
+	}
+	if endpoint.DisableResolver {
+		createOptions = append(createOptions, libnetwork.CreateOptionDisableResolution())
+	}
+
 	return createOptions, nil
 }
 
-func (nm *NetworkManager) sandboxOptions(endpoint *types.Endpoint) ([]libnetwork.SandboxOption, error) {
+func buildSandboxOptions(config network.Config, endpoint *types.Endpoint) ([]libnetwork.SandboxOption, error) {
 	var (
 		sandboxOptions []libnetwork.SandboxOption
 		dns            []string
@@ -463,9 +605,9 @@ func (nm *NetworkManager) sandboxOptions(endpoint *types.Endpoint) ([]libnetwork
 		if len(endpoint.ExtraHosts) == 0 {
 			sandboxOptions = append(sandboxOptions, libnetwork.OptionOriginHostsPath("/etc/hosts"))
 		}
-		if len(endpoint.DNS) == 0 && len(nm.config.DNS) == 0 &&
-			len(endpoint.DNSSearch) == 0 && len(nm.config.DNSSearch) == 0 &&
-			len(endpoint.DNSOptions) == 0 && len(nm.config.DNSOptions) == 0 {
+		if len(endpoint.DNS) == 0 && len(config.DNS) == 0 &&
+			len(endpoint.DNSSearch) == 0 && len(config.DNSSearch) == 0 &&
+			len(endpoint.DNSOptions) == 0 && len(config.DNSOptions) == 0 {
 			sandboxOptions = append(sandboxOptions, libnetwork.OptionOriginResolvConfPath("/etc/resolv.conf"))
 		}
 	} else {
@@ -478,8 +620,8 @@ func (nm *NetworkManager) sandboxOptions(endpoint *types.Endpoint) ([]libnetwork
 	// parse DNS
 	if len(endpoint.DNS) > 0 {
 		dns = endpoint.DNS
-	} else if len(nm.config.DNS) > 0 {
-		dns = nm.config.DNS
+	} else if len(config.DNS) > 0 {
+		dns = config.DNS
 	}
 	for _, d := range dns {
 		sandboxOptions = append(sandboxOptions, libnetwork.OptionDNS(d))
@@ -488,8 +630,8 @@ func (nm *NetworkManager) sandboxOptions(endpoint *types.Endpoint) ([]libnetwork
 	// parse DNS Search
 	if len(endpoint.DNSSearch) > 0 {
 		dnsSearch = endpoint.DNSSearch
-	} else if len(nm.config.DNSSearch) > 0 {
-		dnsSearch = nm.config.DNSSearch
+	} else if len(config.DNSSearch) > 0 {
+		dnsSearch = config.DNSSearch
 	}
 	for _, ds := range dnsSearch {
 		sandboxOptions = append(sandboxOptions, libnetwork.OptionDNSSearch(ds))
@@ -498,8 +640,8 @@ func (nm *NetworkManager) sandboxOptions(endpoint *types.Endpoint) ([]libnetwork
 	// parse DNS Options
 	if len(endpoint.DNSOptions) > 0 {
 		dnsOptions = endpoint.DNSOptions
-	} else if len(nm.config.DNSOptions) > 0 {
-		dnsOptions = nm.config.DNSOptions
+	} else if len(config.DNSOptions) > 0 {
+		dnsOptions = config.DNSOptions
 	}
 	for _, ds := range dnsOptions {
 		sandboxOptions = append(sandboxOptions, libnetwork.OptionDNSOptions(ds))
@@ -508,6 +650,65 @@ func (nm *NetworkManager) sandboxOptions(endpoint *types.Endpoint) ([]libnetwork
 	// TODO: secondary ip address
 	// TODO: parse extra hosts
 	// TODO: port mapping
+	var bindings = make(nat.PortMap)
+	if endpoint.PortBindings != nil {
+		for p, b := range endpoint.PortBindings {
+			bindings[nat.Port(p)] = []nat.PortBinding{}
+			for _, bb := range b {
+				bindings[nat.Port(p)] = append(bindings[nat.Port(p)], nat.PortBinding{
+					HostIP:   bb.HostIP,
+					HostPort: bb.HostPort,
+				})
+			}
+		}
+	}
+
+	portSpecs := endpoint.ExposedPorts
+	var ports = make([]nat.Port, len(portSpecs))
+	var i int
+	for p := range endpoint.ExposedPorts {
+		ports[i] = nat.Port(p)
+		i++
+	}
+	nat.SortPortMap(ports, bindings)
+
+	var (
+		exposeList []networktypes.TransportPort
+		pbList     []networktypes.PortBinding
+	)
+	for _, port := range ports {
+		expose := networktypes.TransportPort{}
+		expose.Proto = networktypes.ParseProtocol(port.Proto())
+		expose.Port = uint16(port.Int())
+		exposeList = append(exposeList, expose)
+
+		pb := networktypes.PortBinding{Port: expose.Port, Proto: expose.Proto}
+		binding := bindings[port]
+		for i := 0; i < len(binding); i++ {
+			pbCopy := pb.GetCopy()
+			newP, err := nat.NewPort(nat.SplitProtoPort(binding[i].HostPort))
+			var portStart, portEnd int
+			if err == nil {
+				portStart, portEnd, err = newP.Range()
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to parsing HostPort value(%s):%v", binding[i].HostPort, err)
+			}
+			pbCopy.HostPort = uint16(portStart)
+			pbCopy.HostPortEnd = uint16(portEnd)
+			pbCopy.HostIP = net.ParseIP(binding[i].HostIP)
+			pbList = append(pbList, pbCopy)
+		}
+
+		if endpoint.PublishAllPorts && len(binding) == 0 {
+			pbList = append(pbList, pb)
+		}
+	}
+
+	sandboxOptions = append(sandboxOptions,
+		libnetwork.OptionPortMapping(pbList),
+		libnetwork.OptionExposedPorts(exposeList))
+
 	return sandboxOptions, nil
 }
 
@@ -522,9 +723,11 @@ func (nm *NetworkManager) cleanEndpointConfig(epConfig *apitypes.EndpointSetting
 	epConfig.MacAddress = ""
 }
 
-func joinOptions(epConfig *apitypes.EndpointSettings) ([]libnetwork.EndpointOption, error) {
+func joinOptions(endpoint *types.Endpoint) ([]libnetwork.EndpointOption, error) {
 	var joinOptions []libnetwork.EndpointOption
 	// TODO: parse endpoint's links
 
+	// set priority option
+	joinOptions = append(joinOptions, libnetwork.JoinOptionPriority(nil, endpoint.Priority))
 	return joinOptions, nil
 }

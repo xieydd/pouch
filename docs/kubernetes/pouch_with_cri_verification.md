@@ -1,6 +1,6 @@
-# pouch with cri verification
+# PouchContainer with cri verification
 
-[cri-tools](https://github.com/kubernetes-incubator/cri-tools) provides a CLI([crictl](https://github.com/kubernetes-incubator/cri-tools/blob/master/docs/crictl.md)) for CRI-compatible container runtimes. This is an easy way to verify CRI implementation in pouch without setting up all Kubernetes components.
+[cri-tools](https://github.com/kubernetes-incubator/cri-tools) provides a CLI([crictl](https://github.com/kubernetes-incubator/cri-tools/blob/master/docs/crictl.md)) for CRI-compatible container runtimes. This is an easy way to verify CRI implementation in PouchContainer without setting up all Kubernetes components.
 
 ## Install
 
@@ -60,6 +60,7 @@ image-endpoint: /var/run/pouchcri.sock
 timeout: 10
 debug: true
 ```
+
 ## Examples
 
 ### Run sandbox with config file
@@ -97,10 +98,13 @@ Image is update to date for 0153c5db97e5
 IMAGE                        TAG                 IMAGE ID            SIZE
 docker.io/library/redis      alpine              0153c5db97e58       10.1MB
 ```
+
 ### unsuccessful cases
 
-If pouch has not fully or correctly implemented some interfaces in CRI, crictl command execution would fail:
+If PouchContainer has not fully or correctly implemented some interfaces in CRI, crictl command execution would fail:
+
 ```
+
 # crictl ps
 FATA[0000] listing containers failed: rpc error: code = Unknown desc = ListContainers Not Implemented Yet
 ```

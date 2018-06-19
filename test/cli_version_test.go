@@ -8,11 +8,12 @@ import (
 	"github.com/alibaba/pouch/test/command"
 	"github.com/alibaba/pouch/test/environment"
 	"github.com/alibaba/pouch/version"
+
 	"github.com/go-check/check"
 	"github.com/gotestyourself/gotestyourself/icmd"
 )
 
-// PouchVersionSuite is the test suite fo help CLI.
+// PouchVersionSuite is the test suite for version CLI.
 type PouchVersionSuite struct{}
 
 func init() {
@@ -31,7 +32,7 @@ func (suite *PouchVersionSuite) TestPouchVersion(c *check.C) {
 	res := command.PouchRun("version").Assert(c, icmd.Success)
 	kv := versionToKV(res.Combined())
 
-	c.Assert(kv["GoVersion"], check.Equals, version.GOVersion)
+	c.Assert(kv["GoVersion"], check.Equals, runtime.Version())
 	c.Assert(kv["APIVersion"], check.Equals, version.APIVersion)
 	c.Assert(kv["Arch"], check.Equals, runtime.GOARCH)
 	c.Assert(kv["Os"], check.Equals, runtime.GOOS)

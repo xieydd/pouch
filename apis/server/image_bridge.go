@@ -28,12 +28,13 @@ func (s *Server) pullImage(ctx context.Context, rw http.ResponseWriter, req *htt
 		return httputils.NewHTTPError(err, http.StatusBadRequest)
 	}
 
-	if tag == "" {
-		tag = "latest"
+	if tag != "" {
+		image = image + ":" + tag
 	}
+
 	// record the time spent during image pull procedure.
 	defer func(start time.Time) {
-		metrics.ImagePullSummary.WithLabelValues(image + ":" + tag).Observe(metrics.SinceInMicroseconds(start))
+		metrics.ImagePullSummary.WithLabelValues(image).Observe(metrics.SinceInMicroseconds(start))
 	}(time.Now())
 
 	// get registry auth from Request header
@@ -46,23 +47,11 @@ func (s *Server) pullImage(ctx context.Context, rw http.ResponseWriter, req *htt
 		}
 	}
 	// Error information has be sent to client, so no need call resp.Write
-	if err := s.ImageMgr.PullImage(ctx, image, tag, &authConfig, rw); err != nil {
-		logrus.Errorf("failed to pull image %s:%s: %v", image, tag, err)
+	if err := s.ImageMgr.PullImage(ctx, image, &authConfig, rw); err != nil {
+		logrus.Errorf("failed to pull image %s: %v", image, err)
 		return nil
 	}
-
 	return nil
-}
-
-func (s *Server) listImages(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
-	filters := req.FormValue("filters")
-
-	imageList, err := s.ImageMgr.ListImages(ctx, filters)
-	if err != nil {
-		logrus.Errorf("failed to list images: %v", err)
-		return err
-	}
-	return EncodeResponse(rw, http.StatusOK, imageList)
 }
 
 func (s *Server) getImage(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
@@ -75,6 +64,17 @@ func (s *Server) getImage(ctx context.Context, rw http.ResponseWriter, req *http
 	}
 
 	return EncodeResponse(rw, http.StatusOK, imageInfo)
+}
+
+func (s *Server) listImages(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+	filters := req.FormValue("filters")
+
+	imageList, err := s.ImageMgr.ListImages(ctx, filters)
+	if err != nil {
+		logrus.Errorf("failed to list images: %v", err)
+		return err
+	}
+	return EncodeResponse(rw, http.StatusOK, imageList)
 }
 
 func (s *Server) searchImages(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
@@ -98,8 +98,8 @@ func (s *Server) removeImage(ctx context.Context, rw http.ResponseWriter, req *h
 		return err
 	}
 
-	containers, err := s.ContainerMgr.List(ctx, func(meta *mgr.ContainerMeta) bool {
-		return meta.Image == image.Name
+	containers, err := s.ContainerMgr.List(ctx, func(c *mgr.Container) bool {
+		return c.Image == image.ID
 	}, &mgr.ContainerListOption{All: true})
 	if err != nil {
 		return err
@@ -107,17 +107,45 @@ func (s *Server) removeImage(ctx context.Context, rw http.ResponseWriter, req *h
 
 	isForce := httputils.BoolValue(req, "force")
 	if !isForce && len(containers) > 0 {
-		return fmt.Errorf("Unable to remove the image %q (must force) - container %s is using this image", image.Name, containers[0].ID)
+		return fmt.Errorf("Unable to remove the image %q (must force) - container (%s, %s) is using this image", image.ID, containers[0].ID, containers[0].Name)
 	}
 
-	option := &mgr.ImageRemoveOption{
-		Force: isForce,
-	}
-
-	if err := s.ImageMgr.RemoveImage(ctx, image, option); err != nil {
+	if err := s.ImageMgr.RemoveImage(ctx, name, isForce); err != nil {
 		return err
 	}
 
 	rw.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// postImageTag adds tag for the existing image.
+func (s *Server) postImageTag(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+	name := mux.Vars(req)["name"]
+
+	targetRef := req.FormValue("repo")
+	if tag := req.FormValue("tag"); tag != "" {
+		targetRef = fmt.Sprintf("%s:%s", targetRef, tag)
+	}
+
+	if err := s.ImageMgr.AddTag(ctx, name, targetRef); err != nil {
+		return err
+	}
+
+	rw.WriteHeader(http.StatusCreated)
+	return nil
+}
+
+// loadImage loads an image by http tar stream.
+func (s *Server) loadImage(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+	imageName := req.FormValue("name")
+	if imageName == "" {
+		imageName = "unknown/unknown"
+	}
+
+	if err := s.ImageMgr.LoadImage(ctx, imageName, req.Body); err != nil {
+		return err
+	}
+
+	rw.WriteHeader(http.StatusOK)
 	return nil
 }

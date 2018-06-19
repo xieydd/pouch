@@ -23,11 +23,18 @@ func (suite *APIVolumeListSuite) SetUpTest(c *check.C) {
 // TestVolumeListOk tests if list volumes is OK.
 func (suite *APIVolumeListSuite) TestVolumeListOk(c *check.C) {
 	// Create a volume with the name "TestVolume1".
-	err := CreateVolume(c, "TestVolume1", "local")
+	err := CreateVolume(c, "TestVolume1", "local", nil)
 	c.Assert(err, check.IsNil)
+	defer RemoveVolume(c, "TestVolume1")
 
-	// Create a volume with the name "TestVolume1".
-	err = CreateVolume(c, "TestVolume2", "local")
+	// Create a volume with the name "TestVolume2".
+	err = CreateVolume(c, "TestVolume2", "local", nil)
+	c.Assert(err, check.IsNil)
+	defer RemoveVolume(c, "TestVolume2")
+
+	// Create a volume with the name "TestVolume3".
+	options := map[string]string{"mountpoint": "/data/TestVolume3"}
+	err = CreateVolume(c, "TestVolume3", "local", options)
 	c.Assert(err, check.IsNil)
 
 	// Test volume list feature.
@@ -40,13 +47,15 @@ func (suite *APIVolumeListSuite) TestVolumeListOk(c *check.C) {
 	volumeListResp := &types.VolumeListResp{}
 	err = request.DecodeBody(volumeListResp, resp.Body)
 	c.Assert(err, check.IsNil)
-	c.Assert(len(volumeListResp.Volumes), check.Equals, 2)
 
-	// Delete the TestVolume1.
-	err = RemoveVolume(c, "TestVolume1")
-	c.Assert(err, check.IsNil)
-
-	// Delete the TestVolume2.
-	err = RemoveVolume(c, "TestVolume2")
-	c.Assert(err, check.IsNil)
+	// Check response having the pre-created two volumes.
+	found := 0
+	for _, volume := range volumeListResp.Volumes {
+		if volume.Name == "TestVolume1" ||
+			volume.Name == "TestVolume2" ||
+			volume.Name == "TestVolume3" {
+			found++
+		}
+	}
+	c.Assert(found, check.Equals, 3)
 }

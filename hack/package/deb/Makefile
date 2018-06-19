@@ -38,9 +38,9 @@ clean:
 
 #.PHONY: modules
 modules:
-	@./hack/module --add-volume=github.com/alibaba/pouch/volume/modules/ceph
-	@./hack/module --add-volume=github.com/alibaba/pouch/volume/modules/tmpfs
-	@./hack/module --add-volume=github.com/alibaba/pouch/volume/modules/local
+	@./hack/module --add-volume=github.com/alibaba/pouch/storage/volume/modules/ceph
+	@./hack/module --add-volume=github.com/alibaba/pouch/storage/volume/modules/tmpfs
+	@./hack/module --add-volume=github.com/alibaba/pouch/storage/volume/modules/local
 
 # install binaries
 .PHONY: install
@@ -52,12 +52,12 @@ install: build
 	# install containerd
 	echo "Download and install containerd."
 	[ -d $(TMP) ] || mkdir -p /tmp/tmp.pouch
-	wget --quiet https://github.com/containerd/containerd/releases/download/v1.0.0/containerd-1.0.0.linux-amd64.tar.gz -P $(TMP)
-	tar xf $(TMP)/containerd-1.0.0.linux-amd64.tar.gz -C $(TMP) && cp -f $(TMP)/bin/* debian/pouch/usr/bin/
+	wget --quiet https://github.com/containerd/containerd/releases/download/v1.0.3/containerd-1.0.3.linux-amd64.tar.gz -P $(TMP)
+	tar xf $(TMP)/containerd-1.0.3.linux-amd64.tar.gz -C $(TMP) && cp -f $(TMP)/bin/* debian/pouch/usr/bin/
 
 	# install runc
 	echo "Download and install runc."
-	wget --quiet https://github.com/opencontainers/runc/releases/download/v1.0.0-rc4/runc.amd64 -P $(TMP)/bin
+	wget --quiet https://github.com/alibaba/runc/releases/download/v1.0.0-rc4-1/runc.amd64 -P $(TMP)/bin
 	chmod +x $(TMP)/bin/runc.amd64
 	mv $(TMP)/bin/runc.amd64 debian/pouch/usr/bin/runc
 

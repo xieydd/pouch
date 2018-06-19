@@ -17,6 +17,7 @@ func init() {
 // SetUpTest does common setup in the beginning of each test.
 func (suite *APIContainerDeleteSuite) SetUpTest(c *check.C) {
 	SkipIfFalse(c, environment.IsLinux)
+	PullImage(c, busyboxImage)
 }
 
 // TestDeleteNonExisting tests deleting a non-existing container return error.
@@ -42,7 +43,7 @@ func (suite *APIContainerDeleteSuite) TestDeleteRunningCon(c *check.C) {
 
 	CheckRespStatus(c, resp, 500)
 
-	DelContainerForceOk(c, cname)
+	DelContainerForceMultyTime(c, cname)
 }
 
 // TestDeletePausedCon test deleting paused container return 500.
@@ -60,7 +61,7 @@ func (suite *APIContainerDeleteSuite) TestDeletePausedCon(c *check.C) {
 
 	CheckRespStatus(c, resp, 500)
 
-	DelContainerForceOk(c, cname)
+	DelContainerForceMultyTime(c, cname)
 }
 
 // TestDeleteStoppedCon test deleting stopped container return 204.

@@ -13,8 +13,9 @@ pouch rmi [OPTIONS] IMAGE [IMAGE...]
 ### Examples
 
 ```
-$ pouch rmi registry.hub.docker.com/library/busybox:latest
+$ pouch rmi registry.hub.docker.com/library/busybox:latest registry.hub.docker.com/library/busybox:1.28
 registry.hub.docker.com/library/busybox:latest
+registry.hub.docker.com/library/busybox:1.28
 $ pouch create --name test registry.hub.docker.com/library/busybox:latest
 container ID: e5952417f9ee94621bbeaec532be1803ae2dedeb11a80f578a6d621e04a95afd, name: test
 $ pouch rmi registry.hub.docker.com/library/busybox:latest
@@ -32,6 +33,7 @@ Error: failed to remove image: {"message":"Unable to remove the image \"registry
 ### Options inherited from parent commands
 
 ```
+  -D, --debug              Switch client log level to DEBUG mode
   -H, --host string        Specify connecting address of Pouch CLI (default "unix:///var/run/pouchd.sock")
       --tlscacert string   Specify CA file of TLS
       --tlscert string     Specify cert file of TLS
